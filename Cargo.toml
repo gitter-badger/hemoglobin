@@ -6,3 +6,5 @@ authors = ["Bernardo Meurer <meurerbernardo@gmail.com>"]
 [dependencies]
 rand = "0.3.17"
 rustty = "0.1.12"
+termion = "1.5.1"
+tui = { git = 'https://github.com/fdehau/tui-rs' }

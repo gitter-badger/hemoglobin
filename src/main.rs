@@ -1,16 +1,37 @@
 extern crate rand;
 extern crate rustty;
+extern crate termion;
+extern crate tui;
 
 use std::collections::HashSet;
+use std::io;
+use std::sync::mpsc;
+use std::thread;
 use std::time::Duration;
 
 use rand::Rng;
 
-use rustty::{Terminal, Event, HasSize, CellAccessor};
-use rustty::ui::{Widget, Alignable, HorizontalAlign, VerticalAlign};
+use termion::event;
+use termion::input::TermRead;
+
+use tui::Terminal;
+use tui::backend::MouseBackend;
+use tui::widgets::{border, Block, Dataset, Marker, Widget, Chart, Axis};
+use tui::widgets::canvas::Canvas;
+use tui::layout::{Direction, Group, Rect, Size};
+use tui::style::{Color, Style, Modifier};
 
 type Cell = (usize, usize);
 type CellSet = HashSet<Cell>;
+
+const ALIVE: &'static str = "\u{25AA}";
+const DEAD: &'static str = " ";
+
+enum Event {
+    Input(event::Key),
+    Tick,
+}
+
 
 struct World {
     height: usize,
@@ -77,7 +98,8 @@ impl World {
 
     // TODO: Fix dumbness
     fn neighbor_count(&self, cell: &Cell) -> (CellSet, CellSet) {
-        let mut neighbors: (CellSet, CellSet) = (HashSet::with_capacity(8), HashSet::with_capacity(8));
+        let mut neighbors: (CellSet, CellSet) =
+            (HashSet::with_capacity(8), HashSet::with_capacity(8));
         for neighbor in self.neighbors(cell) {
             if self.grid.contains(&neighbor) {
                 neighbors.0.insert(neighbor);
@@ -107,58 +129,119 @@ impl World {
         self.grid = new_state;
     }
 
-    fn render(&self, canvas: &mut Widget) {
-        for x in 0..self.width {
-            for y in 0..self.height {
-                let mut cell = canvas.get_mut(x, y).unwrap();
-                if self.grid.contains(&(x, y)) {
-                    cell.set_ch('\u{25AA}');
-                } else {
-                    cell.set_ch(' ');
-                }
-            }
-        }
+    fn render(&self, t: &mut Terminal<MouseBackend>) {
+        let tsize = t.size().unwrap();
+        Chart::default()
+            .block(Block::default().title("Chart"))
+            .x_axis(
+                Axis::default()
+                    .title("X Axis")
+                    .title_style(Style::default().fg(Color::Red))
+                    .style(Style::default().fg(Color::Gray))
+                    .bounds([0.0, 10.0])
+                    .labels(&[" "]),
+            )
+            .y_axis(
+                Axis::default()
+                    .title("Y Axis")
+                    .title_style(Style::default().fg(Color::Red))
+                    .style(Style::default().fg(Color::Gray))
+                    .bounds([0.0, 10.0])
+                    .labels(&[" "]),
+            )
+            .datasets(
+                &[
+                    Dataset::default()
+                        .name("data1")
+                        .marker(Marker::Dot)
+                        .style(Style::default().fg(Color::Cyan))
+                        .data(&[(0.0, 5.0), (1.0, 6.0), (1.5, 6.434)]),
+                    Dataset::default()
+                        .name("data2")
+                        .marker(Marker::Braille)
+                        .style(Style::default().fg(Color::Magenta))
+                        .data(&[(4.0, 5.0), (5.0, 8.0), (7.66, 13.5)]),
+                ],
+            )
+            .render(t, &tsize);
+
+
+        t.draw().unwrap();
     }
 }
 
 
 fn main() {
     //Create terminal and canvas
-    let mut term = Terminal::new().unwrap();
-    let mut canvas = Widget::new(term.size().0, term.size().1);
-    canvas.align(&term, HorizontalAlign::Left, VerticalAlign::Top, 0);
+    let backend = MouseBackend::new().unwrap();
+    let mut terminal = Terminal::new(backend).unwrap();
 
-    let (width, height) = canvas.size();
-    let mut w = World::new((width, height));
-    w.gen();
+    // Channels
+    // TODO: Understand this
+    let (tx, rx) = mpsc::channel();
+    let input_tx = tx.clone();
+    let clock_tx = tx.clone();
 
-    let mut auto = false;
-    let mut delay;
-
-    'rendering: loop {
-    	if auto {
-    		delay = 0;
-    	} else {
-    		delay = 10;
-    	}
-        while let Some(Event::Key(c)) =
-            term.get_event(Some(Duration::from_millis(delay)).unwrap())
-                .unwrap()
-        {
-            match c {
-                'q' => break 'rendering,
-                'g' => w.gen(),
-                'n' => w.step(),
-                'a' => auto = true,
-                's' => auto = false,
-                _ => {}
+    // Input
+    thread::spawn(move || {
+        let stdin = io::stdin();
+        for c in stdin.keys() {
+            let evt = c.unwrap();
+            input_tx.send(Event::Input(evt)).unwrap();
+            if evt == event::Key::Char('q') {
+                break;
             }
         }
-        if auto {
-            w.step();
+    });
+
+    // Tick
+    thread::spawn(move || loop {
+        clock_tx.send(Event::Tick).unwrap();
+        thread::sleep(Duration::from_millis(500));
+    });
+
+    // First draw call
+    terminal.clear().unwrap();
+    terminal.hide_cursor().unwrap();
+    let tsize: (usize, usize) = (
+        terminal.size().unwrap().height as usize,
+        terminal.size().unwrap().width as usize,
+    );
+    let mut w = World::new(tsize);
+    w.gen();
+    w.render(&mut terminal);
+
+    let mut auto = false;
+
+    loop {
+        let evt = rx.recv().unwrap();
+        match evt {
+            Event::Input(input) => {
+                match input {
+                    event::Key::Char('q') => {
+                        break;
+                    }
+                    event::Key::Char('g') => {
+                        w.gen();
+                    }
+                    event::Key::Char('n') => {
+                        w.step();
+                    }
+                    event::Key::Char('a') => {
+                        auto = true;
+                    }
+                    event::Key::Char('s') => {
+                        auto = false;
+                    }
+                    _ => {}
+                }
+            }
+            Event::Tick => {
+                if auto {
+                    w.step();
+                }
+            }
         }
-        w.render(&mut canvas);
-        canvas.draw_into(&mut term);
-        term.swap_buffers().unwrap();
+        //w.render(&mut terminal);
     }
 }
